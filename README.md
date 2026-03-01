@@ -14,47 +14,9 @@ A production-style **Todo Web Application** deployed on **AWS EKS** using **Terr
 ### ✅ Live URL (what to paste in the application form)
 **Live App URL:** `http://<ALB_DNS_NAME>/`
 
-You can retrieve the ALB DNS using:
-
-```bash
-kubectl get ingress -n todo-app
 
 
-Look under the ADDRESS column and open it in the browser.
-
-Example:
-
-todo-app   alb   <ALB_DNS_NAME>   ...
-
-If your Ingress is configured with a host, then use:
-http://<host>/
-Otherwise ALB DNS works directly.
-
-🔐 Test Credentials (if login is enabled)
-
-If your live app requires authentication, provide either:
-
-a test username/password, OR
-
-clear steps to self-create a user inside the app.
-
-Option A — Provide test credentials
-
-Username/Email: <your-test-user>
-
-Password: <your-test-password>
-
-Option B — Self-create
-
-Open the Live URL
-
-Click Sign Up
-
-Create a user (no manual approval required)
-
-⚠️ Applications without access credentials typically won’t be reviewed.
-
-🧩 Architecture Overview
+## 🧩 Architecture Overview
 High-level Flow
 
 Users access the app through an AWS Application Load Balancer (ALB) created via the AWS Load Balancer Controller on EKS.
@@ -208,15 +170,7 @@ Secure secrets flow (AWS Secrets Manager → External Secrets → Kubernetes)
 
 ALB Ingress routing to live app on EKS
 
-🧭 Troubleshooting (Quick)
-Get the live app ALB address
-kubectl get ingress -n todo-app
-Check pod health
-kubectl get pods -n todo-app
-kubectl describe pod <pod> -n todo-app
-kubectl logs <pod> -n todo-app
-Check DB connectivity from cluster
-kubectl -n todo-app get secret todo-app-db-secret -o yaml
+
 📌 Tech Stack
 
 AWS: EKS, RDS PostgreSQL, VPC, IAM, Secrets Manager
@@ -237,5 +191,3 @@ MIT (or your preferred license)
 
 
 ---
-
-If you tell me your **actual Live ALB DNS** (or paste `kubectl get ingress -n todo-app` outpu
