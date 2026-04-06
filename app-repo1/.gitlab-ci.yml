@@ -1,0 +1,42 @@
+stages:
+  - build
+
+variables:
+  DOCKER_HOST: "tcp://docker:2375"
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  ECR_REGISTRY: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  ECR_IMAGE: "${ECR_REGISTRY}/${ECR_REPO}"
+
+build_and_push:
+  stage: build
+  image: docker:24.0.7
+  services:
+    - name: docker:24.0.7-dind
+      command: ["--tls=false"]
+
+  before_script:
+    - apk add --no-cache aws-cli
+    - aws --version
+    - docker version
+
+    - test -n "$AWS_ACCESS_KEY_ID" || (echo "AWS_ACCESS_KEY_ID missing" && exit 1)
+    - test -n "$AWS_SECRET_ACCESS_KEY" || (echo "AWS_SECRET_ACCESS_KEY missing" && exit 1)
+    - test -n "$AWS_REGION" || (echo "AWS_REGION missing" && exit 1)
+    - test -n "$AWS_ACCOUNT_ID" || (echo "AWS_ACCOUNT_ID missing" && exit 1)
+    - test -n "$ECR_REPO" || (echo "ECR_REPO missing" && exit 1)
+
+    - aws sts get-caller-identity
+
+    - aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}"
+
+    - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+  script:
+    - docker build -t "${ECR_IMAGE}:${IMAGE_TAG}" ./web_app_todo
+    - docker push "${ECR_IMAGE}:${IMAGE_TAG}"
+    - docker tag "${ECR_IMAGE}:${IMAGE_TAG}" "${ECR_IMAGE}:latest"
+    - docker push "${ECR_IMAGE}:latest"
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
