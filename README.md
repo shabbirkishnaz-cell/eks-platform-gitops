@@ -11,7 +11,7 @@ A production-style **Todo Web Application** deployed on **AWS EKS** using **Terr
 
 ## 🌐 Live Application Access
 
-### ✅ Live URL (what to paste in the application form)
+### ✅ Live URL 
 **Live App URL:** `http://<ALB_DNS_NAME>/`
 
 
@@ -187,7 +187,7 @@ Observability: Prometheus metrics endpoint (Grafana-ready)
 
 License
 
-MIT (or your preferred license)
+MIT 
 
 
 ---
