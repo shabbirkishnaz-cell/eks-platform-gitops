@@ -1,91 +1,139 @@
-## 📌 Important Context
+# EKS Platform GitOps — Production-Grade AWS Kubernetes Platform
 
-This is a **production-style EKS platform** I built end-to-end. It was fully deployed and running on AWS with:
-- **Karpenter** for dynamic node provisioning
-- **KEDA** for event-driven autoscaling  
-- **Prometheus + Grafana** for observability
-- **Argo CD** for GitOps deployments
-- **External Secrets** for secure credential management
-
-The live deployment has been taken down to control AWS costs, but all infrastructure and deployment code is here.
-
-**CI/CD Pipelines** are in the original GitLab repository (pipelines in `.gitlab-ci.yml`).
-
-To see what was deployed: Check `infra-repo/` for Terraform (Karpenter, EKS, RDS) and `platform-repo/` for Kubernetes/Helm manifests.
-
-# ✅ Todo App Platform (AWS EKS + GitOps + RDS PostgreSQL)
-
-A production-style **Todo Web Application** deployed on **AWS EKS** using **Terraform (IaC)** + **Argo CD GitOps**, backed by **Amazon RDS PostgreSQL**, with **observability-ready metrics** and secure secret management.
-
-> This repo is organized as a 3-part platform:
-> - **infra-repo** → Terraform provisions AWS infrastructure (VPC, EKS, RDS, IAM, etc.)
-> - **platform-repo** → GitOps deployment (Argo CD Applications + Helm charts)
-> - **app-repo1** → Application source code + Docker build
+> A fully deployed, end-to-end cloud-native platform built on AWS EKS using Terraform, Argo CD GitOps, Karpenter, KEDA, and Prometheus/Grafana observability.
 
 ---
 
-## 🌐 Live Application Access
+## 📌 About This Project
 
-### ✅ Live URL 
-**Live App URL:** `http://<ALB_DNS_NAME>/`
+This is a **production-style platform** I designed and deployed end-to-end on AWS — not a tutorial or learning exercise.
 
+The platform was fully running on AWS with real infrastructure, real GitOps deployments, and real observability. It has been taken offline to avoid ongoing AWS costs (~$10/day for the full stack), but **all infrastructure and deployment code is here and fully deployable.**
 
+**CI/CD pipelines** were built in GitLab (`.gitlab-ci.yml`) and are included in this repository for reference.
 
-## 🧩 Architecture Overview
-High-level Flow
+---
 
-Users access the app through an AWS Application Load Balancer (ALB) created via the AWS Load Balancer Controller on EKS.
+## 🏗️ Architecture Overview
 
-The application runs as a containerized Streamlit service and connects privately to Amazon RDS PostgreSQL.
+```
+Users
+  │
+  ▼
+AWS ALB (Application Load Balancer)
+  │   [AWS Load Balancer Controller on EKS]
+  ▼
+EKS Cluster
+  ├── CRUD Node Pool        (Karpenter — compute-optimized, on-demand)
+  │     └── App Pods        (HPA on RPS + latency)
+  │           └── PgBouncer (connection pooling → RDS)
+  │
+  └── AI/Bursty Node Pool   (Karpenter — spot instances, burst-friendly)
+        └── App Pods        (KEDA — event-driven on queue depth)
+              └── Vector DB + Inference workloads
+  │
+  ▼
+Amazon RDS PostgreSQL (private subnet, Multi-AZ)
+  │
+  ▼
+AWS Secrets Manager → External Secrets Operator → Kubernetes Secrets
+```
 
-Secrets are injected securely using External Secrets Operator + AWS Secrets Manager, and Kubernetes access is secured via IRSA (OIDC).
+**Key Design Decisions:**
+- Separate Karpenter node pools for different workload types — prevents resource starvation
+- KEDA for event-driven scaling (queue depth, active connections) instead of CPU-only HPA
+- PgBouncer in transaction mode — protects RDS from connection storms
+- IRSA + External Secrets — zero hardcoded credentials anywhere
 
-Diagram (Mermaid)
-🔒 Security Highlights
+---
 
-RDS in private subnets (no public IP)
+## 📁 Repository Structure
 
-IRSA/OIDC for Kubernetes service accounts (no static AWS keys)
-
-Secrets from AWS Secrets Manager synced into Kubernetes via External Secrets
-
-Least-privilege IAM for controllers (ALB Controller, External Secrets, Image Updater, etc.)
-
-📈 Observability
-
-The application exposes metrics (Prometheus format), making it easy to integrate with:
-
-Prometheus scraping
-
-Grafana dashboards
-
-Alerting rules (future-ready)
-
-📁 Repository Structure (All Three Folders)
+```
 .
-├── app-repo1/           # Application source + Docker build
-├── infra-repo/          # Terraform infrastructure provisioning
-└── platform-repo/       # GitOps deployment (Argo CD + Helm)
-1) 🚀 app-repo1 — Application (Streamlit + Docker)
+├── infra-repo/          # Terraform — AWS infrastructure provisioning
+├── platform-repo/       # GitOps — Argo CD Applications + Helm charts
+└── app-repo1/           # Application — source code + Docker build
+```
 
-Path: app-repo1/web_app_todo/
+---
 
-What it contains
+## 🔧 What's Inside Each Folder
 
-Streamlit-based Todo UI
+### 1. `infra-repo/` — Infrastructure (Terraform)
 
-PostgreSQL integration (users + todos)
+Provisions the full AWS infrastructure from scratch:
 
-Password hashing (bcrypt)
+| Resource | Details |
+|---|---|
+| VPC | Multi-AZ, public + private subnets |
+| EKS Cluster | Managed node groups + Karpenter node pools |
+| Karpenter | Separate NodePools for CRUD and bursty workloads |
+| RDS PostgreSQL | Private subnet, Multi-AZ, encrypted |
+| IAM + OIDC | IRSA-ready, least-privilege roles per service account |
+| Remote State | S3 backend + DynamoDB locking |
+| CI Pipeline | GitLab CI — fmt / validate / plan / apply |
 
-Metrics endpoint (Prometheus client)
+**Terraform Workflow:**
+```bash
+cd infra-repo
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan
+terraform apply
+```
 
-Dockerfile for container build
+---
 
-Local Run (optional)
+### 2. `platform-repo/` — GitOps (Argo CD + Helm)
 
-If you want to run locally (requires PostgreSQL):
+Deploys and manages all workloads on EKS using GitOps:
 
+| Component | Details |
+|---|---|
+| Argo CD | Root app orchestration, sync waves for deploy order |
+| Helm Charts | App deployment, service, ingress, ConfigMaps |
+| KEDA ScaledObjects | Event-driven autoscaling on Prometheus metrics |
+| External Secrets | DB credentials injected from AWS Secrets Manager |
+| Argo CD Image Updater | Automatic image tag updates on new builds |
+| Karpenter NodePools | Workload-aware node provisioning configs |
+
+**Key Paths:**
+```
+platform-repo/
+├── apps/
+│   └── todo-app/          # Helm chart — Deployment, Service, Ingress
+├── clusters/
+│   └── prod/              # Argo CD Application manifests
+└── keda/
+    └── scaled-objects/    # KEDA ScaledObject configs per service
+```
+
+**Deploy/Sync:**
+
+Once Argo CD is installed and pointing to this repo:
+```bash
+kubectl apply -f platform-repo/clusters/prod/root-app.yaml
+```
+Argo CD will reconcile and create all namespaces, deployments, services, ingress, and secrets automatically.
+
+---
+
+### 3. `app-repo1/` — Application (Python + Docker)
+
+A Streamlit-based web application with PostgreSQL integration.
+
+| Feature | Details |
+|---|---|
+| UI | Streamlit — login, todo management |
+| Database | PostgreSQL (via PgBouncer connection pool) |
+| Security | bcrypt password hashing |
+| Observability | Prometheus metrics endpoint (`/metrics`) |
+| Packaging | Docker — ECR-ready |
+
+**Local Run (requires PostgreSQL):**
+```bash
 cd app-repo1/web_app_todo
 pip install -r requirements.txt
 
@@ -94,129 +142,106 @@ export DB_PORT=5432
 export DB_NAME=todo
 export DB_USER=postgres
 export DB_PASSWORD=postgres
-export DB_SSLMODE=disable
 
 streamlit run web.py --server.port 8501
+```
 
-Open:
-
-http://localhost:8501
-
-Docker Build (optional)
-cd app-repo1/web_app_todo
-docker build -t todo-app:local .
+**Docker Build:**
+```bash
+docker build -t eks-platform-app:local .
 docker run -p 8501:8501 \
-  -e DB_HOST=<dbhost> -e DB_PORT=5432 -e DB_NAME=todo \
-  -e DB_USER=<user> -e DB_PASSWORD=<pass> \
-  todo-app:local
-2) 🏗️ infra-repo — Infrastructure (Terraform)
-
-Goal: Provision AWS infrastructure for a production-style Kubernetes deployment.
-
-What it provisions
-
-Multi-AZ VPC with public & private subnets
-
-EKS cluster
-
-RDS PostgreSQL (private)
-
-IAM roles + OIDC provider (IRSA-ready)
-
-Terraform remote state (S3 + DynamoDB locking)
-
-CI pipeline for fmt/validate/plan/apply
-
-Typical Terraform Workflow
-cd infra-repo
-terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan
-terraform apply
-
-Outputs include RDS endpoint and secret ARN (depending on modules/outputs).
-
-3) ⚙️ platform-repo — GitOps (Argo CD + Helm)
-
-Goal: Deploy everything on EKS using GitOps, including the todo-app, controllers, and secrets.
-
-What it contains
-
-Argo CD Applications (root app orchestration)
-
-Helm chart for todo-app
-
-External Secret definitions for DB creds
-
-Deploy order controlled using sync waves
-
-Image automation support (Argo CD Image Updater)
-
-Key Paths
-
-platform-repo/apps/todo-app/
-Helm chart + templates (Deployment, Service, Ingress, ConfigMaps)
-
-platform-repo/clusters/prod/
-Production overlays / Argo CD Application manifests
-
-Deploy/Sync
-
-Once Argo CD is installed and pointing to this repo, Argo CD sync will create:
-
-Namespace todo-app
-
-Todo deployment + service + ingress
-
-ExternalSecrets that inject DB credentials into the pods
-
-✅ What I Personally Built / Owned
-
-End-to-end cloud-native platform implementation:
-
-Terraform-based AWS provisioning (VPC/EKS/RDS/IAM)
-
-GitOps deployment (Argo CD Applications + Helm)
-
-Containerized application packaging (Docker/ECR-ready)
-
-Secure secrets flow (AWS Secrets Manager → External Secrets → Kubernetes)
-
-ALB Ingress routing to live app on EKS
-
-
-📌 Tech Stack
-
-AWS: EKS, RDS PostgreSQL, VPC, IAM, Secrets Manager
-
-Kubernetes: Ingress, Services, Deployments, ConfigMaps, Secrets
-
-GitOps: Argo CD (+ Image Updater support)
-
-IaC: Terraform
-
-App: Python + Streamlit
-
-Observability: Prometheus metrics endpoint (Grafana-ready)
-
-License
-
-MIT 
-
+  -e DB_HOST=<host> \
+  -e DB_PORT=5432 \
+  -e DB_NAME=todo \
+  -e DB_USER=<user> \
+  -e DB_PASSWORD=<password> \
+  eks-platform-app:local
+```
 
 ---
 
+## 🔑 Key Technologies & Why
 
+| Technology | Why I Used It |
+|---|---|
+| **Karpenter** | Dynamic node provisioning based on actual pod resource requests — not fixed node groups. Separate pools for different workload types prevent resource starvation. |
+| **KEDA** | Event-driven pod scaling on real signals (queue depth, active connections, Prometheus metrics) — not just CPU, which is misleading for DB-heavy and AI workloads. |
+| **PgBouncer** | Transaction-mode connection pooling protects RDS from connection storms when many pods try to connect simultaneously. |
+| **Argo CD** | GitOps-based deployments — Git is the single source of truth. All changes are auditable, reversible, and automatic. |
+| **External Secrets Operator** | Syncs secrets from AWS Secrets Manager into Kubernetes — zero hardcoded credentials in code or manifests. |
+| **IRSA** | IAM roles bound to Kubernetes service accounts via OIDC — no static AWS keys anywhere in the cluster. |
+| **Prometheus + Grafana** | Golden signal dashboards (RPS, latency, error rate, saturation) per service — enables SLO-based alerting and capacity forecasting. |
 
-## 🔧 Key Technologies & Why
+---
 
-- **Karpenter** — Dynamic node autoscaling based on pod resource requests (not just CPU)
-- **KEDA** — Event-driven pod autoscaling on custom metrics
-- **Argo CD** — GitOps-based deployments with automatic reconciliation
-- **External Secrets Operator** — Secure credential injection from AWS Secrets Manager
-- **AWS Load Balancer Controller** — Native AWS ALB routing on Kubernetes
-- **IRSA** — IAM roles for Kubernetes service accounts (zero static credentials)
+## 🔒 Security Highlights
+
+- RDS in **private subnets** — no public IP, no direct internet access
+- **IRSA/OIDC** — Kubernetes service accounts get AWS permissions without static keys
+- **External Secrets Operator** — credentials never stored in Git or container images
+- **Least-privilege IAM** — separate roles per controller (ALB Controller, External Secrets, Image Updater, Karpenter)
+- **Network policies** — pod-to-pod traffic restricted by namespace
+
+---
+
+## 📈 Observability
+
+| Signal | Tool | What It Monitors |
+|---|---|---|
+| Metrics | Prometheus + Grafana | RPS, p95/p99 latency, error rate, pod count, node utilization |
+| Logs | CloudWatch | Application logs, EKS control plane logs |
+| Scaling events | Karpenter logs | Node provisioning and deprovisioning |
+| DB performance | RDS Performance Insights | Query latency, connection count, wait events |
+
+Grafana dashboards include:
+- Golden signals per service
+- Karpenter node scaling activity
+- RDS connection pool utilization
+- Cost tracking by node pool
+
+---
+
+## ✅ What I Built and Owned
+
+This was a solo end-to-end build. I personally designed, implemented, and deployed:
+
+- **Terraform modules** — VPC, EKS, RDS, IAM, Karpenter, remote state
+- **GitOps structure** — Argo CD root app, Helm charts, sync waves, image updater
+- **Karpenter NodePools** — workload-aware node provisioning with spot + on-demand mix
+- **KEDA ScaledObjects** — event-driven autoscaling on Prometheus custom metrics
+- **Observability stack** — Prometheus, Grafana, ServiceMonitor configs, alert rules
+- **Security layer** — IRSA, External Secrets, least-privilege IAM, network policies
+- **CI/CD pipelines** — GitLab CI for Terraform (fmt/validate/plan/apply) and Docker builds
+
+---
+
+## 🚀 Tech Stack
+
+| Layer | Technologies |
+|---|---|
+| Cloud | AWS (EKS, RDS, VPC, IAM, Secrets Manager, ECR, S3) |
+| Orchestration | Kubernetes, Helm, Karpenter, KEDA |
+| GitOps | Argo CD, Argo CD Image Updater |
+| IaC | Terraform |
+| Observability | Prometheus, Grafana, CloudWatch |
+| Security | IRSA, External Secrets Operator, AWS Secrets Manager |
+| CI/CD | GitLab CI |
+| Application | Python, Streamlit, Docker |
+| Database | PostgreSQL (RDS), PgBouncer |
+
+---
+
+## 📝 Notes
+
+- **Live URL:** Taken offline to control AWS costs. Full stack costs approximately $10/day when running.
+- **CI/CD Pipelines:** Originally built in GitLab. `.gitlab-ci.yml` files are included in each sub-repo for reference.
+- **Karpenter + KEDA configs:** See `infra-repo/` for NodePool definitions and `platform-repo/keda/` for ScaledObject configs.
+
+---
+
+## License
+
+MIT
 
 
 
