@@ -1,138 +1,233 @@
-# EKS Platform GitOps — Production-Grade AWS Kubernetes Platform
+# EKS Platform GitOps
 
-> A fully deployed, end-to-end cloud-native platform built on AWS EKS using Terraform, Argo CD GitOps, Karpenter, KEDA, and Prometheus/Grafana observability.
+A production-style cloud-native platform built end-to-end on AWS EKS using Terraform, Argo CD GitOps, Karpenter, Prometheus/Grafana observability, and automated CI/CD pipelines.
 
----
-
-## 📌 About This Project
-
-This is a **production-style platform** I designed and deployed end-to-end on AWS — not a tutorial or learning exercise.
-
-The platform was fully running on AWS with real infrastructure, real GitOps deployments, and real observability. It has been taken offline to avoid ongoing AWS costs (~$10/day for the full stack), but **all infrastructure and deployment code is here and fully deployable.**
-
-**CI/CD pipelines** were built in GitLab (`.gitlab-ci.yml`) and are included in this repository for reference.
+> The platform was fully deployed and running on AWS. It has been taken offline to avoid ongoing infrastructure costs. All code is here and fully deployable.
 
 ---
 
-## 🏗️ Architecture Overview
+## What This Project Covers
+
+This is a full platform engineering project — not a tutorial. It includes:
+
+- AWS infrastructure provisioned entirely with **Terraform** (custom modular structure)
+- **Argo CD** GitOps with sync-wave ordered deployments across 15 applications
+- **Karpenter** for dynamic node provisioning with SQS-based spot interruption handling
+- **HPA v2** with CPU and memory autoscaling (fast scale-up, slow scale-down)
+- **Prometheus + Grafana** with 4 custom dashboards and ServiceMonitor-based scraping
+- **External Secrets Operator** syncing RDS credentials from AWS Secrets Manager
+- **Argo CD Image Updater** for automatic image tag updates on ECR push
+- **FastAPI + Streamlit** application with health endpoints, Prometheus metrics, and bcrypt auth
+- **k6 load tests** ramping to 100 concurrent users with p95 latency thresholds
+- **GitLab CI pipelines** for Terraform (fmt/validate/plan/apply) and Docker (build/push to ECR)
+
+---
+
+## Repository Structure
+
+```
+.
+├── infra-repo/          # Terraform — AWS infrastructure (custom modules)
+├── platform-repo/       # Argo CD GitOps — all Kubernetes manifests
+└── app-repo1/           # Application — FastAPI + Streamlit + Docker + k6 load tests
+```
+
+---
+
+## Architecture
 
 ```
 Users
   │
   ▼
-AWS ALB (Application Load Balancer)
-  │   [AWS Load Balancer Controller on EKS]
+AWS ALB  ←  AWS Load Balancer Controller (Helm, sync-wave 20)
+  │
   ▼
 EKS Cluster
-  ├── CRUD Node Pool        (Karpenter — compute-optimized, on-demand)
-  │     └── App Pods        (HPA on RPS + latency)
-  │           └── PgBouncer (connection pooling → RDS)
   │
-  └── AI/Bursty Node Pool   (Karpenter — spot instances, burst-friendly)
-        └── App Pods        (KEDA — event-driven on queue depth)
-              └── Vector DB + Inference workloads
+  ├── Managed Node Group  (bootstrap — system workloads)
+  │
+  └── Karpenter NodePool  (t2/t3 on-demand, amd64, linux)
+        consolidation: WhenEmptyOrUnderutilized after 30s
+        CPU limit: 4 cores
+        │
+        ├── todo-app pods
+        │     HPA: min 2, max 10 replicas
+        │     Scale on: CPU 60% | Memory 70%
+        │     Scale-up window: 30s | Scale-down window: 600s
+        │
+        └── Platform controllers
+              Karpenter, External Secrets, Argo CD Image Updater,
+              Prometheus, Grafana, ALB Controller, Metrics Server
   │
   ▼
-Amazon RDS PostgreSQL (private subnet, Multi-AZ)
-  │
-  ▼
-AWS Secrets Manager → External Secrets Operator → Kubernetes Secrets
-```
-
-**Key Design Decisions:**
-- Separate Karpenter node pools for different workload types — prevents resource starvation
-- KEDA for event-driven scaling (queue depth, active connections) instead of CPU-only HPA
-- PgBouncer in transaction mode — protects RDS from connection storms
-- IRSA + External Secrets — zero hardcoded credentials anywhere
-
----
-
-## 📁 Repository Structure
-
-```
-.
-├── infra-repo/          # Terraform — AWS infrastructure provisioning
-├── platform-repo/       # GitOps — Argo CD Applications + Helm charts
-└── app-repo1/           # Application — source code + Docker build
+Amazon RDS PostgreSQL (private subnet, db.t3.micro)
+  └── Credentials injected via External Secrets ← AWS Secrets Manager
 ```
 
 ---
 
-## 🔧 What's Inside Each Folder
+## Infrastructure — infra-repo (Terraform)
 
-### 1. `infra-repo/` — Infrastructure (Terraform)
+All custom modules. No third-party registry modules used.
 
-Provisions the full AWS infrastructure from scratch:
-
-| Resource | Details |
+| Module | What It Provisions |
 |---|---|
-| VPC | Multi-AZ, public + private subnets |
-| EKS Cluster | Managed node groups + Karpenter node pools |
-| Karpenter | Separate NodePools for CRUD and bursty workloads |
-| RDS PostgreSQL | Private subnet, Multi-AZ, encrypted |
-| IAM + OIDC | IRSA-ready, least-privilege roles per service account |
-| Remote State | S3 backend + DynamoDB locking |
-| CI Pipeline | GitLab CI — fmt / validate / plan / apply |
+| `network` | Multi-AZ VPC, public + private subnets, NAT gateway, VPC endpoints |
+| `eks-cluster` | EKS control plane, cluster security group, OIDC issuer URL |
+| `node-groups` | Managed node group for system/bootstrap workloads |
+| `oidc-provider` | OIDC identity provider for IRSA |
+| `karpenter` | Controller IRSA role, node IAM role, SQS queue + EventBridge rules for interruption handling |
+| `irsa-roles` | Separate IRSA roles for ALB Controller, External Secrets, Argo CD Image Updater, ECR token rotator |
+| `rds-postgres` | RDS PostgreSQL in private subnet, security group scoped to EKS node SGs |
+| `eks-addons` | Core EKS managed add-ons |
 
-**Terraform Workflow:**
-```bash
-cd infra-repo
-terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan
-terraform apply
+**Remote state:** S3 backend with DynamoDB locking. Separate `backend.hcl` and `terraform.tfvars` per environment (`envs/dev/`, `envs/prod/`).
+
+**GitLab CI pipeline stages:**
+
+```
+MR  →  fmt check  →  validate  →  plan:dev + plan:prod (artifacts saved)
+main merge  →  apply:prod  (manual trigger)
 ```
 
 ---
 
-### 2. `platform-repo/` — GitOps (Argo CD + Helm)
+## GitOps Platform — platform-repo (Argo CD)
 
-Deploys and manages all workloads on EKS using GitOps:
+Single root Argo CD application (`root-app.yaml`) manages all child apps using sync-wave annotations for ordered deployment:
 
-| Component | Details |
+| Sync Wave | Application |
 |---|---|
-| Argo CD | Root app orchestration, sync waves for deploy order |
-| Helm Charts | App deployment, service, ingress, ConfigMaps |
-| KEDA ScaledObjects | Event-driven autoscaling on Prometheus metrics |
-| External Secrets | DB credentials injected from AWS Secrets Manager |
-| Argo CD Image Updater | Automatic image tag updates on new builds |
-| Karpenter NodePools | Workload-aware node provisioning configs |
+| 00 | Namespaces (karpenter, monitoring, external-secrets, todo-app) |
+| 05 | External Secrets CRDs |
+| 06 | Argo CD Image Updater folder |
+| 10 | External Secrets operator + todo-app HPA |
+| 15 | Argo CD Image Updater |
+| 20 | Metrics Server + AWS Load Balancer Controller |
+| 30 | Karpenter (OCI chart from public ECR, v1.0.5) |
+| 40 | Karpenter NodePool + EC2NodeClass |
+| 45 | Prometheus Operator CRDs |
+| 50 | Prometheus + Grafana stack |
+| 60 | todo-app (Helm chart + Image Updater) |
+| 65 | todo-app DB ExternalSecret |
 
-**Key Paths:**
-```
-platform-repo/
-├── apps/
-│   └── todo-app/          # Helm chart — Deployment, Service, Ingress
-├── clusters/
-│   └── prod/              # Argo CD Application manifests
-└── keda/
-    └── scaled-objects/    # KEDA ScaledObject configs per service
+**Karpenter NodePool:**
+```yaml
+capacity-type: on-demand
+instance-category: t
+instance-generation: > 2
+instance-size: [micro, small]
+consolidationPolicy: WhenEmptyOrUnderutilized
+consolidateAfter: 30s
+limits:
+  cpu: "4"
 ```
 
-**Deploy/Sync:**
+**Argo CD Image Updater:**
+- Watches ECR for tags matching `^[0-9a-f]{7,40}$` (git commit SHA)
+- Write-back method: commits updated tag to `values-prod.yaml` via HTTPS + Git PAT
+- ECR auth: rotating token via CronJob + ExternalSecret
 
-Once Argo CD is installed and pointing to this repo:
-```bash
-kubectl apply -f platform-repo/clusters/prod/root-app.yaml
-```
-Argo CD will reconcile and create all namespaces, deployments, services, ingress, and secrets automatically.
+**External Secrets:**
+- `ClusterSecretStore` backed by AWS Secrets Manager
+- RDS credentials synced into `todo-app-db-secret` (refresh: 1h)
+- Git credentials synced for Image Updater authentication
 
 ---
 
-### 3. `app-repo1/` — Application (Python + Docker)
+## Observability
 
-A Streamlit-based web application with PostgreSQL integration.
+**kube-prometheus-stack** with all components enabled:
 
-| Feature | Details |
+| Component | Status |
 |---|---|
-| UI | Streamlit — login, todo management |
-| Database | PostgreSQL (via PgBouncer connection pool) |
-| Security | bcrypt password hashing |
-| Observability | Prometheus metrics endpoint (`/metrics`) |
-| Packaging | Docker — ECR-ready |
+| Prometheus | Enabled |
+| Grafana | Enabled (sidecar dashboard injection via ConfigMap label) |
+| Alertmanager | Enabled |
+| kube-state-metrics | Enabled |
+| node-exporter | Enabled |
 
-**Local Run (requires PostgreSQL):**
+**ServiceMonitor** scrapes `/metrics` on port 8000 every 15s with target labels: `app`, `env`, `team`, `app.kubernetes.io/version`, `app.kubernetes.io/instance`.
+
+**4 custom Grafana dashboards** auto-loaded via ConfigMap sidecar:
+- `todo-app-dashboard` — application metrics
+- `todo-app-overview-dashboard` — platform overview
+- `todo-app-performance-dashboard` — latency and throughput
+- `todo-app-k8s-health-dashboard` — Kubernetes resource health
+
+---
+
+## Application — app-repo1 (FastAPI + Streamlit)
+
+**API (FastAPI on port 8000):**
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/livez` | GET | Always returns 200 — liveness check |
+| `/healthz` | GET | TCP check to DB — returns 503 if unreachable |
+| `/api/signup` | POST | Create user with bcrypt password hash |
+| `/api/login` | POST | Authenticate, verify bcrypt hash |
+| `/api/todos` | GET | List todos for user |
+| `/api/todos` | POST | Create todo |
+| `/api/todos/{id}` | DELETE | Delete todo |
+| `/metrics` | GET | Prometheus metrics endpoint |
+
+**Health server** runs on port 8081 in a background thread. Performs TCP socket check to DB before returning healthy — used for Kubernetes readiness probe.
+
+**Kubernetes probes:**
+- Readiness: `GET /` port 8501, initialDelay 15s, period 5s, failureThreshold 3
+- Liveness: `GET /` port 8501, initialDelay 30s, period 10s, failureThreshold 3
+
+**GitLab CI pipeline:**
+```
+push to main
+  → docker build (tagged with $CI_COMMIT_SHORT_SHA)
+  → docker push to ECR (:<sha> and :latest)
+  → Argo CD Image Updater detects new tag
+  → commits updated tag to values-prod.yaml
+  → Argo CD reconciles → rolling deploy
+```
+
+---
+
+## Load Testing (k6)
+
+Located in `app-repo1/load-tests/k6/load-test.js`
+
+**Traffic profile:**
+
+| Stage | Duration | Virtual Users |
+|---|---|---|
+| Ramp up | 2 min | 0 → 20 |
+| Ramp up | 3 min | 20 → 50 |
+| Ramp up | 5 min | 50 → 100 |
+| Hold | 5 min | 100 |
+| Ramp down | 2 min | 100 → 0 |
+
+**Thresholds:** HTTP error rate `< 5%` | p95 latency `< 2000ms`
+
+**Test flow per virtual user:** login → list todos → create todo → list todos → delete todo → sleep 1s
+
+---
+
+## Security Controls
+
+| Control | Implementation |
+|---|---|
+| No static AWS credentials | IRSA via OIDC for every controller |
+| Secret injection | AWS Secrets Manager → External Secrets → Kubernetes Secret |
+| RDS isolation | Private subnet, SG restricted to EKS node security groups only |
+| Password storage | bcrypt hash — never plaintext |
+| Least privilege | Separate scoped IAM role per controller |
+| Karpenter interruption | SQS queue + EventBridge rules for graceful spot handling |
+
+---
+
+## Running Locally
+
+**Requirements:** Python 3.12, PostgreSQL
+
 ```bash
 cd app-repo1/web_app_todo
 pip install -r requirements.txt
@@ -146,102 +241,46 @@ export DB_PASSWORD=postgres
 streamlit run web.py --server.port 8501
 ```
 
-**Docker Build:**
+**Docker:**
+
 ```bash
-docker build -t eks-platform-app:local .
-docker run -p 8501:8501 \
+docker build -t todo-app:local ./web_app_todo
+
+docker run -p 8501:8501 -p 8000:8000 \
   -e DB_HOST=<host> \
   -e DB_PORT=5432 \
   -e DB_NAME=todo \
   -e DB_USER=<user> \
   -e DB_PASSWORD=<password> \
-  eks-platform-app:local
+  todo-app:local
 ```
 
 ---
 
-## 🔑 Key Technologies & Why
+## Full Tech Stack
 
-| Technology | Why I Used It |
+| Layer | Technology |
 |---|---|
-| **Karpenter** | Dynamic node provisioning based on actual pod resource requests — not fixed node groups. Separate pools for different workload types prevent resource starvation. |
-| **KEDA** | Event-driven pod scaling on real signals (queue depth, active connections, Prometheus metrics) — not just CPU, which is misleading for DB-heavy and AI workloads. |
-| **PgBouncer** | Transaction-mode connection pooling protects RDS from connection storms when many pods try to connect simultaneously. |
-| **Argo CD** | GitOps-based deployments — Git is the single source of truth. All changes are auditable, reversible, and automatic. |
-| **External Secrets Operator** | Syncs secrets from AWS Secrets Manager into Kubernetes — zero hardcoded credentials in code or manifests. |
-| **IRSA** | IAM roles bound to Kubernetes service accounts via OIDC — no static AWS keys anywhere in the cluster. |
-| **Prometheus + Grafana** | Golden signal dashboards (RPS, latency, error rate, saturation) per service — enables SLO-based alerting and capacity forecasting. |
-
----
-
-## 🔒 Security Highlights
-
-- RDS in **private subnets** — no public IP, no direct internet access
-- **IRSA/OIDC** — Kubernetes service accounts get AWS permissions without static keys
-- **External Secrets Operator** — credentials never stored in Git or container images
-- **Least-privilege IAM** — separate roles per controller (ALB Controller, External Secrets, Image Updater, Karpenter)
-- **Network policies** — pod-to-pod traffic restricted by namespace
-
----
-
-## 📈 Observability
-
-| Signal | Tool | What It Monitors |
-|---|---|---|
-| Metrics | Prometheus + Grafana | RPS, p95/p99 latency, error rate, pod count, node utilization |
-| Logs | CloudWatch | Application logs, EKS control plane logs |
-| Scaling events | Karpenter logs | Node provisioning and deprovisioning |
-| DB performance | RDS Performance Insights | Query latency, connection count, wait events |
-
-Grafana dashboards include:
-- Golden signals per service
-- Karpenter node scaling activity
-- RDS connection pool utilization
-- Cost tracking by node pool
-
----
-
-## ✅ What I Built and Owned
-
-This was a solo end-to-end build. I personally designed, implemented, and deployed:
-
-- **Terraform modules** — VPC, EKS, RDS, IAM, Karpenter, remote state
-- **GitOps structure** — Argo CD root app, Helm charts, sync waves, image updater
-- **Karpenter NodePools** — workload-aware node provisioning with spot + on-demand mix
-- **KEDA ScaledObjects** — event-driven autoscaling on Prometheus custom metrics
-- **Observability stack** — Prometheus, Grafana, ServiceMonitor configs, alert rules
-- **Security layer** — IRSA, External Secrets, least-privilege IAM, network policies
-- **CI/CD pipelines** — GitLab CI for Terraform (fmt/validate/plan/apply) and Docker builds
-
----
-
-## 🚀 Tech Stack
-
-| Layer | Technologies |
-|---|---|
-| Cloud | AWS (EKS, RDS, VPC, IAM, Secrets Manager, ECR, S3) |
-| Orchestration | Kubernetes, Helm, Karpenter, KEDA |
+| Cloud | AWS (EKS, RDS, VPC, IAM, Secrets Manager, ECR, S3, SQS, EventBridge) |
+| IaC | Terraform (custom modules, S3 + DynamoDB remote state) |
+| Orchestration | Kubernetes, Helm |
+| Node autoscaling | Karpenter v1.0.5 (EC2NodeClass, NodePool, SQS interruption) |
+| Pod autoscaling | HPA v2 (CPU + memory) |
 | GitOps | Argo CD, Argo CD Image Updater |
-| IaC | Terraform |
-| Observability | Prometheus, Grafana, CloudWatch |
+| Observability | Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter |
 | Security | IRSA, External Secrets Operator, AWS Secrets Manager |
-| CI/CD | GitLab CI |
-| Application | Python, Streamlit, Docker |
-| Database | PostgreSQL (RDS), PgBouncer |
+| CI/CD | GitLab CI (Terraform pipeline + Docker build/push pipeline) |
+| Application | Python, FastAPI, Streamlit, psycopg2, bcrypt, prometheus_client |
+| Load testing | k6 |
 
 ---
 
-## 📝 Notes
+## Notes
 
-- **Live URL:** Taken offline to control AWS costs. Full stack costs approximately $10/day when running.
-- **CI/CD Pipelines:** Originally built in GitLab. `.gitlab-ci.yml` files are included in each sub-repo for reference.
-- **Karpenter + KEDA configs:** See `infra-repo/` for NodePool definitions and `platform-repo/keda/` for ScaledObject configs.
-
----
-
-## License
-
-MIT
+- **Live URL:** Taken offline to control costs. Full stack costs approximately $8–12/day when running on AWS
+- **CI/CD pipelines:** Originally in GitLab. `.gitlab-ci.yml` files are included in each sub-repo for reference
+- **KEDA:** Not used — HPA with CPU/memory was sufficient for this synchronous workload. KEDA would be the right choice if the architecture used async job queues (e.g. SQS-backed inference workers)
+- **Multi-AZ RDS:** Set to `false` to reduce cost. Change `multi_az = true` in `modules/rds-postgres` for production
 
 
 
