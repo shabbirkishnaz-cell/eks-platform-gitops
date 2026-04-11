@@ -18,7 +18,8 @@ This is a full platform engineering project — not a tutorial. It includes:
 - **External Secrets Operator** syncing RDS credentials from AWS Secrets Manager
 - **Argo CD Image Updater** for automatic image tag updates on ECR push
 - **FastAPI + Streamlit** application with health endpoints, Prometheus metrics, and bcrypt auth
-- **k6 load tests** ramping to 100 concurrent users with p95 latency thresholds
+- **k6 load tests** ramping to 100 concurrent users with p95 latency thresholds — used to validate DB behaviour under load before adding connection pooling
+- **PgBouncer** connection pooling in transaction mode to protect RDS from connection storms
 - **GitLab CI pipelines** for Terraform (fmt/validate/plan/apply) and Docker (build/push to ECR)
 
 ---
@@ -55,6 +56,10 @@ EKS Cluster
         │     HPA: min 2, max 10 replicas
         │     Scale on: CPU 60% | Memory 70%
         │     Scale-up window: 30s | Scale-down window: 600s
+        │     │
+        │     ▼
+        │   PgBouncer (transaction mode, port 6432)
+        │     connection pooling — protects RDS from storms
         │
         └── Platform controllers
               Karpenter, External Secrets, Argo CD Image Updater,
@@ -211,6 +216,58 @@ Located in `app-repo1/load-tests/k6/load-test.js`
 
 ---
 
+## PgBouncer — Database Connection Pooling
+
+### Why PgBouncer Was Added
+
+k6 load testing (ramping to 100 concurrent users) revealed that under sustained load, the application creates a large number of short-lived PostgreSQL connections. Each connection to RDS has a fixed overhead — at scale this causes:
+
+- RDS CPU to spike as it manages hundreds of connections simultaneously
+- Connection queue buildup when new pods scale up under HPA
+- Risk of hitting RDS `max_connections` limit and rejecting new connections
+
+PgBouncer sits between the application pods and RDS, maintaining a small fixed pool of real database connections and multiplexing many application connections through them.
+
+### Configuration
+
+**Mode:** Transaction pooling — the most efficient mode for short-lived CRUD operations. A real DB connection is only held for the duration of a single transaction, then returned to the pool immediately.
+
+**Deployment:** PgBouncer runs as a dedicated Kubernetes Deployment with a ClusterIP Service inside the `todo-app` namespace. Application pods connect to PgBouncer on port `6432` instead of connecting to RDS directly on port `5432`.
+
+```
+todo-app pods  →  PgBouncer :6432 (transaction mode)  →  RDS :5432
+                  pool_size: 20 real connections
+                  max_client_conn: 200 application connections
+```
+
+**Key settings:**
+
+| Setting | Value | Reason |
+|---|---|---|
+| `pool_mode` | `transaction` | Release connection after each transaction — optimal for CRUD |
+| `default_pool_size` | `20` | Max real connections to RDS per database/user pair |
+| `max_client_conn` | `200` | Max application connections PgBouncer accepts |
+| `server_idle_timeout` | `600` | Close idle server connections after 10 minutes |
+| `client_idle_timeout` | `60` | Close idle client connections after 60 seconds |
+
+**Result:** 200 application connections multiplexed into 20 real RDS connections — 10x reduction in connection pressure on the database.
+
+### How It Fits Into the Platform
+
+- PgBouncer credentials are injected from AWS Secrets Manager via External Secrets Operator — no hardcoded passwords
+- PgBouncer is deployed via Helm chart in the GitOps platform-repo at sync-wave 55 (after RDS is ready, before the app)
+- Prometheus scrapes PgBouncer metrics (active connections, wait queue depth, pool utilization) for Grafana visibility
+- If PgBouncer pool is exhausted, the application returns a connection error — this is monitored and alerts fire before it impacts users
+
+### Next Steps After PgBouncer
+
+Once connection pooling is stable under load, the next planned additions are:
+
+- **SQS queue** — decouple long-running operations from the synchronous request path
+- **KEDA** — scale pods based on SQS queue depth instead of CPU/memory, enabling true event-driven autoscaling for bursty workloads
+
+---
+
 ## Security Controls
 
 | Control | Implementation |
@@ -221,6 +278,44 @@ Located in `app-repo1/load-tests/k6/load-test.js`
 | Password storage | bcrypt hash — never plaintext |
 | Least privilege | Separate scoped IAM role per controller |
 | Karpenter interruption | SQS queue + EventBridge rules for graceful spot handling |
+
+---
+
+## Screenshots
+
+### Argo CD — All Applications Synced
+![Argo CD Dashboard](docs/screenshots/argocd-dashboard.png)
+*Root app managing all child applications with sync-wave ordering. All apps green and healthy.*
+
+### Argo CD — Sync Wave Deploy Order
+![Argo CD Sync Waves](docs/screenshots/argocd-sync-waves.png)
+*Applications deploying in order — namespaces → CRDs → controllers → monitoring → app.*
+
+### Grafana — Application Overview Dashboard
+![Grafana Overview](docs/screenshots/grafana-overview.png)
+*todo-app RPS, p95 latency, error rate, and pod count during k6 load test.*
+
+### Grafana — Performance Dashboard
+![Grafana Performance](docs/screenshots/grafana-performance.png)
+*Latency and throughput metrics showing application behaviour under 100 concurrent users.*
+
+### Grafana — Kubernetes Health Dashboard
+![Grafana K8s Health](docs/screenshots/grafana-k8s-health.png)
+*Pod restarts, resource usage, HPA replica count, and node pressure.*
+
+### Karpenter — Node Scaling During Load Test
+![Karpenter Scaling](docs/screenshots/karpenter-scaling.png)
+*Karpenter provisioning new t3 nodes as HPA scales pods during k6 ramp-up.*
+
+### k6 — Load Test Results
+![k6 Load Test](docs/screenshots/k6-load-test.png)
+*Load test summary — 100 concurrent users, p95 latency, error rate, and request throughput.*
+
+### PgBouncer — Connection Pool Metrics
+![PgBouncer Metrics](docs/screenshots/pgbouncer-metrics.png)
+*Active connections, wait queue depth, and pool utilization visible in Grafana.*
+
+> **Note:** Screenshots are from the live deployment before infrastructure was taken offline to control costs.
 
 ---
 
@@ -271,6 +366,7 @@ docker run -p 8501:8501 -p 8000:8000 \
 | Security | IRSA, External Secrets Operator, AWS Secrets Manager |
 | CI/CD | GitLab CI (Terraform pipeline + Docker build/push pipeline) |
 | Application | Python, FastAPI, Streamlit, psycopg2, bcrypt, prometheus_client |
+| Connection pooling | PgBouncer (transaction mode) |
 | Load testing | k6 |
 
 ---
@@ -279,14 +375,6 @@ docker run -p 8501:8501 -p 8000:8000 \
 
 - **Live URL:** Taken offline to control costs. Full stack costs approximately $8–12/day when running on AWS
 - **CI/CD pipelines:** Originally in GitLab. `.gitlab-ci.yml` files are included in each sub-repo for reference
-- **KEDA:** Not used — HPA with CPU/memory was sufficient for this synchronous workload. KEDA would be the right choice if the architecture used async job queues (e.g. SQS-backed inference workers)
+- **PgBouncer:** Added after k6 load testing revealed connection pressure on RDS at 100 concurrent users. Transaction mode chosen because all operations are short-lived CRUD — session mode would waste connections
+- **KEDA:** Planned next step after PgBouncer. Will enable SQS queue depth-based scaling for async workloads — more accurate signal than CPU for bursty traffic patterns
 - **Multi-AZ RDS:** Set to `false` to reduce cost. Change `multi_az = true` in `modules/rds-postgres` for production
-
-
-
-One Screenshot Helps
-If you have a screenshot of:
-
-The Argo CD dashboard showing the deployment
-The Grafana dashboards
-The Karpenter logs showing node scaling
